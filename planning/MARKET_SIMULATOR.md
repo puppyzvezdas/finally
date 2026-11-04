@@ -88,7 +88,7 @@ DEFAULT_PARAMS = {"sigma": 0.25, "mu": 0.05}     # tickers added at runtime
 
 ```python
 class GBMSimulator:
-    def __init__(self, tickers, dt=DEFAULT_DT, event_probability=0.001): ...
+    def __init__(self, tickers, dt=DEFAULT_DT, event_probability=0.001, seed=None): ...
     def step(self) -> dict[str, float]      # hot path: advance all tickers, return rounded prices
     def add_ticker(self, ticker) -> None    # seeds price/params, rebuilds Cholesky
     def remove_ticker(self, ticker) -> None
@@ -114,10 +114,10 @@ Internal prices keep full float precision; only the returned values are rounded 
 
 ```python
 class SimulatorDataSource(MarketDataSource):
-    def __init__(self, price_cache, update_interval=0.5, event_probability=0.001)
+    def __init__(self, price_cache, update_interval=0.5, event_probability=0.001, seed=None)
     async def start(tickers)   # build GBMSimulator, seed cache, create_task(_run_loop)
     async def stop()           # cancel task, await it
-    async def add_ticker(t)    # sim.add_ticker + immediate cache seed
+    async def add_ticker(t)    # validate + sim.add_ticker + immediate cache seed (also the daily-change baseline)
     async def remove_ticker(t) # sim.remove_ticker + cache.remove
     async def _run_loop()      # while True: step → cache.update → sleep(interval); exceptions logged
 ```
@@ -136,10 +136,9 @@ Separation rationale: `GBMSimulator` is synchronous and deterministic under a se
 
 Existing tests (`tests/market/test_simulator.py`, `test_simulator_source.py`) cover: valid positive prices, initial seeds, add/remove including Cholesky rebuild, unknown tickers, shock behavior with `event_probability=1.0` / `0.0`, and the async source lifecycle (start seeds the cache, stop cancels, add/remove reflect in the cache).
 
-Suggested additions:
-- **Statistical:** with a seeded `np.random.seed`/`random.seed`, simulate ~10⁵ steps and assert the std-dev of log returns ≈ `σ√dt` within tolerance.
-- **Correlation:** assert empirical correlation of AAPL/MSFT log returns > JPM/AAPL.
-- **Determinism hook:** accept an optional `seed` or `numpy.random.Generator` in `GBMSimulator` so E2E tests can get reproducible paths (currently it uses the global RNGs).
+Also covered (added after the 2026-11-04 review): log-return std-dev ≈ `σ√dt`, TSLA vs V volatility ratio, AAPL/MSFT correlation ≈ 0.6 vs AAPL/JPM ≈ 0.3, all ten default tickers factor and stay positive, shock size in 2-5%, ticker normalization, and seeded reproducibility.
+
+**Determinism:** `GBMSimulator(..., seed=N)` and `SimulatorDataSource(..., seed=N)` use per-instance RNGs (`numpy.random.default_rng` and `random.Random`), so paths (including random seed prices for unknown tickers) are reproducible for E2E runs and never touch the global RNG state.
 
 ## Tuning cheat sheet
 

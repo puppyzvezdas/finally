@@ -2,7 +2,42 @@
 
 from __future__ import annotations
 
+import logging
+import re
 from abc import ABC, abstractmethod
+
+logger = logging.getLogger(__name__)
+
+# 1-5 letters, optionally followed by a class suffix (BRK.B, BF-B).
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(?:[.\-][A-Z]{1,2})?$")
+
+
+class UnknownTickerError(ValueError):
+    """Raised by add_ticker() when the provider definitively does not know the symbol."""
+
+
+def normalize_ticker(ticker: str) -> str:
+    """Canonical cache/watchlist key: stripped and upper-cased."""
+    return ticker.strip().upper()
+
+
+def validate_ticker(ticker: str) -> str:
+    """Normalize a ticker and check its format. Raises ValueError if it is malformed."""
+    normalized = normalize_ticker(ticker)
+    if not _TICKER_RE.match(normalized):
+        raise ValueError(f"Invalid ticker symbol: {ticker!r}")
+    return normalized
+
+
+def clean_tickers(tickers: list[str]) -> list[str]:
+    """Normalize a list of tickers, dropping duplicates and (with a warning) malformed ones."""
+    cleaned: dict[str, None] = {}
+    for raw in tickers:
+        try:
+            cleaned[validate_ticker(raw)] = None
+        except ValueError:
+            logger.warning("Ignoring invalid ticker %r", raw)
+    return list(cleaned)
 
 
 class MarketDataSource(ABC):
@@ -42,7 +77,10 @@ class MarketDataSource(ABC):
     async def add_ticker(self, ticker: str) -> None:
         """Add a ticker to the active set. No-op if already present.
 
-        The next update cycle will include this ticker.
+        The ticker is normalized (stripped, upper-cased). Raises ValueError for a malformed
+        symbol and UnknownTickerError if the provider definitively rejects it. A provider that
+        cannot tell yet (rate-limited, request failed) accepts the ticker and prices it on a
+        later update, so callers should still handle ``cache.get_price(t) is None``.
         """
 
     @abstractmethod

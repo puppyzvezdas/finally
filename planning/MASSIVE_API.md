@@ -105,7 +105,7 @@ snaps = client.get_snapshot_all(
 for s in snaps:                                   # list of TickerSnapshot
     print(s.ticker,
           s.last_trade.price,                     # lastTrade.p
-          s.last_trade.timestamp,                 # lastTrade.t  (ns! see §6)
+          s.last_trade.sip_timestamp,             # lastTrade.t  (ns! see §6)
           s.prev_day.close,                       # prevDay.c
           s.todays_change_percent)                # todaysChangePerc
 ```
@@ -212,7 +212,7 @@ Both are per-ticker, so they are not suitable for polling a watchlist. Use the b
        return ts                          # s
    ```
 
-   `backend/app/market/massive_client.py` currently does `timestamp / 1000.0`, which is only right for ms; see the follow-up note in MARKET_INTERFACE.md.
+   `backend/app/market/massive_client.py` implements this as `to_epoch_seconds()` and reads `last_trade.sip_timestamp`. Note that the Python model's `LastTrade` has **no** `timestamp` attribute (fields: `price`, `size`, `exchange`, `sip_timestamp`, `participant_timestamp`, `trf_timestamp`, ...).
 2. **`lastTrade` may be missing** (plan doesn't include trades, or pre-market with no prints). Fall back to `min.c`, then `day.c`, then `prevDay.c`.
 3. **Tickers are case-sensitive**; upper-case before sending. Unknown tickers are simply absent from the response, so diff the request against the response to detect bad symbols.
 4. **Prices outside regular hours** are reflected in `lastTrade` (pre/after-market) but `day` resets and may be zero early in the day.

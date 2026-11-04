@@ -1,10 +1,10 @@
 # Market Data Backend — Summary
 
-**Status:** Complete, tested, reviewed, all issues resolved.
+**Status:** Complete, tested and reviewed. The 2026-11-04 review's findings are resolved (see `MARKET_DATA_REVIEW.md` §8); live verification against a real Massive key is still pending.
 
 ## What Was Built
 
-A complete market data subsystem in `backend/app/market/` (8 modules, ~500 lines) providing live price simulation and real market data via a unified interface.
+A complete market data subsystem in `backend/app/market/` (9 modules) providing live price simulation and real market data via a unified interface.
 
 ### Architecture
 
@@ -25,14 +25,14 @@ MarketDataSource (ABC)
 
 | File | Purpose |
 |------|---------|
-| `models.py` | `PriceUpdate` — immutable frozen dataclass (ticker, price, previous_price, timestamp, change, direction) |
-| `interface.py` | `MarketDataSource` — abstract base class defining `start/stop/add_ticker/remove_ticker/get_tickers` |
-| `cache.py` | `PriceCache` — thread-safe price store with version counter for SSE change detection |
+| `models.py` | `PriceUpdate` — immutable frozen dataclass (ticker, price, previous_price, timestamp, optional reference_price; derived change, change_percent, day_change_percent, direction) |
+| `interface.py` | `MarketDataSource` ABC (`start/stop/add_ticker/remove_ticker/get_tickers`) plus ticker helpers (`normalize_ticker`, `validate_ticker`, `clean_tickers`) and `UnknownTickerError` |
+| `cache.py` | `PriceCache` — thread-safe price store; rejects NaN/non-positive prices; version counter for SSE change detection |
 | `seed_prices.py` | Realistic seed prices, per-ticker GBM params (drift/volatility), correlation groups |
 | `simulator.py` | `GBMSimulator` (Geometric Brownian Motion with Cholesky-correlated moves) + `SimulatorDataSource` |
-| `massive_client.py` | `MassiveDataSource` — REST polling client for Polygon.io via the `massive` package |
+| `massive_client.py` | `MassiveDataSource` — REST polling client via the `massive` package, with price fallbacks, ns timestamp handling, 429 backoff, rate-limited fast add, bounded first poll |
 | `factory.py` | `create_market_data_source()` — selects simulator or Massive based on `MASSIVE_API_KEY` env var |
-| `stream.py` | `create_stream_router()` — FastAPI SSE endpoint factory using version-based change detection |
+| `stream.py` | `create_stream_router()` — FastAPI SSE endpoint factory (new router per call) with version-based change detection and a keep-alive heartbeat |
 
 ### Key Design Decisions
 
@@ -44,30 +44,24 @@ MarketDataSource (ABC)
 
 ## Test Suite
 
-**73 tests, all passing.** 6 test modules in `backend/tests/market/`.
+**185 passed, 1 skipped** (the skipped test is an optional live smoke test that needs `MASSIVE_API_KEY`), on Python 3.13 and 3.12. Overall coverage 98%.
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| test_models.py | 11 | models.py: 100% |
-| test_cache.py | 13 | cache.py: 100% |
-| test_simulator.py | 17 | simulator.py: 98% |
-| test_simulator_source.py | 10 | (integration tests) |
-| test_factory.py | 7 | factory.py: 100% |
-| test_massive.py | 13 | massive_client.py: 56% (expected — API methods mocked) |
+| Module | Coverage |
+|--------|----------|
+| models, cache, interface, factory, stream, seed_prices | 100% |
+| simulator.py | 98% |
+| massive_client.py | 96% |
 
-Overall coverage: 84%.
+Notable test design: Massive tests build snapshots with the real `TickerSnapshot.from_dict` (never `MagicMock`, which hid a wrong attribute name), SSE is tested through the generator and the route, and one contract test runs the same assertions against both sources.
 
-## Code Review & Fixes Applied
+## Review History
 
-A comprehensive code review identified 7 issues. All were resolved:
+- **Review 1 (2026-02-10):** 7 issues (hatch config, lazy imports, SSE annotation, `get_tickers`, correlation constants, test imports, Massive test mocks), all fixed.
+- **Review 2 (2026-11-04):** found that the Massive path dropped every snapshot against the real client (`LastTrade` has `sip_timestamp`, not `timestamp`), plus 4 high, 8 medium and 5 low findings. All addressed; see `MARKET_DATA_REVIEW.md` §8.
 
-1. **pyproject.toml build config** — added `[tool.hatch.build.targets.wheel] packages = ["app"]`
-2. **Lazy imports removed** — `massive` is a core dependency; imports moved to top level
-3. **SSE return type fixed** — `_generate_events` annotated as `AsyncGenerator[str, None]`
-4. **Public `get_tickers()`** — added to `GBMSimulator` to avoid private attribute access
-5. **Correlation constants cleaned up** — removed unused `DEFAULT_CORR`, consolidated into `CROSS_GROUP_CORR`
-6. **Unused test imports removed** — `pytest`, `math`, `asyncio` cleaned from 4 test files
-7. **Massive test mocks fixed** — `source._client` set in tests, patches target correct names
+## Remaining Before the App Is Complete
+
+These belong to the watchlist/portfolio/API work, not the market layer: keep tickers with open positions tracked, map `ValueError`/`UnknownTickerError` to HTTP 400/404, and run the live smoke test with a real key.
 
 ## Demo
 
@@ -91,12 +85,12 @@ source = create_market_data_source(cache)  # Reads MASSIVE_API_KEY
 await source.start(["AAPL", "GOOGL", "MSFT", ...])
 
 # Read prices
-update = cache.get("AAPL")          # PriceUpdate or None
+update = cache.get("AAPL")          # PriceUpdate or None (has .reference_price / .day_change_percent)
 price = cache.get_price("AAPL")     # float or None
 all_prices = cache.get_all()        # dict[str, PriceUpdate]
 
 # Dynamic watchlist
-await source.add_ticker("TSLA")
+await source.add_ticker("TSLA")     # ValueError if malformed; UnknownTickerError (Massive) if unknown
 await source.remove_ticker("GOOGL")
 
 # Shutdown

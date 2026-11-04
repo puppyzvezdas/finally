@@ -126,6 +126,93 @@ class TestGBMSimulator:
         result = sim.step()
         price_str = str(result["AAPL"])
         # Check that we have at most 2 decimal places
-        if '.' in price_str:
-            decimal_part = price_str.split('.')[1]
+        if "." in price_str:
+            decimal_part = price_str.split(".")[1]
             assert len(decimal_part) <= 2
+
+
+class TestStatistics:
+    """Statistical properties of the GBM output (seeded, so deterministic)."""
+
+    @staticmethod
+    def _log_returns(sim, tickers, steps):
+        """Log returns from unrounded internal state (per-tick moves are sub-cent)."""
+        import numpy as np
+
+        prev = {t: sim._prices[t] for t in tickers}
+        out = {t: [] for t in tickers}
+        for _ in range(steps):
+            sim.step()
+            for t in tickers:
+                out[t].append(np.log(sim._prices[t] / prev[t]))
+                prev[t] = sim._prices[t]
+        return {t: np.array(v) for t, v in out.items()}
+
+    def test_log_return_stddev_matches_sigma_sqrt_dt(self):
+        import numpy as np
+        import pytest
+
+        from app.market.seed_prices import TICKER_PARAMS
+
+        sim = GBMSimulator(["AAPL"], event_probability=0.0, seed=42)
+        returns = self._log_returns(sim, ["AAPL"], 50_000)["AAPL"]
+        expected = TICKER_PARAMS["AAPL"]["sigma"] * np.sqrt(GBMSimulator.DEFAULT_DT)
+        assert np.std(returns) == pytest.approx(expected, rel=0.03)
+
+    def test_higher_sigma_means_more_movement(self):
+        import numpy as np
+
+        sim = GBMSimulator(["TSLA", "V"], event_probability=0.0, seed=1)
+        returns = self._log_returns(sim, ["TSLA", "V"], 20_000)
+        assert np.std(returns["TSLA"]) > 2 * np.std(returns["V"])  # sigma 0.50 vs 0.17
+
+    def test_same_sector_more_correlated_than_cross_sector(self):
+        import numpy as np
+
+        sim = GBMSimulator(["AAPL", "MSFT", "JPM"], event_probability=0.0, seed=7)
+        r = self._log_returns(sim, ["AAPL", "MSFT", "JPM"], 30_000)
+        tech = np.corrcoef(r["AAPL"], r["MSFT"])[0, 1]
+        cross = np.corrcoef(r["AAPL"], r["JPM"])[0, 1]
+        assert tech > cross + 0.15
+        assert 0.5 < tech < 0.7  # configured rho = 0.6
+        assert 0.2 < cross < 0.4  # configured rho = 0.3
+
+    def test_all_default_tickers_construct_and_stay_positive(self):
+        from app.market.seed_prices import SEED_PRICES
+
+        sim = GBMSimulator(list(SEED_PRICES), seed=3)
+        assert sim._cholesky is not None and sim._cholesky.shape == (10, 10)
+        for _ in range(2_000):
+            prices = sim.step()
+            assert len(prices) == 10 and all(p > 0 for p in prices.values())
+
+    def test_shock_events_move_price_two_to_five_percent(self):
+        sim = GBMSimulator(["AAPL"], event_probability=1.0, seed=5)
+        before = sim.get_price("AAPL")
+        after = sim.step()["AAPL"]
+        assert 0.019 <= abs(after / before - 1) <= 0.051
+
+
+class TestSeeding:
+    def test_same_seed_same_path(self):
+        a = GBMSimulator(["AAPL", "MSFT", "ZZZZ"], seed=11)
+        b = GBMSimulator(["AAPL", "MSFT", "ZZZZ"], seed=11)
+        assert a.get_price("ZZZZ") == b.get_price("ZZZZ")  # unknown-ticker seed price too
+        assert [a.step() for _ in range(200)] == [b.step() for _ in range(200)]
+
+    def test_different_seeds_diverge(self):
+        a, b = GBMSimulator(["AAPL"], seed=1), GBMSimulator(["AAPL"], seed=2)
+        assert [a.step() for _ in range(50)] != [b.step() for _ in range(50)]
+
+    def test_does_not_touch_global_rng_state(self):
+        import random
+
+        import numpy as np
+
+        random.seed(123)
+        np.random.seed(123)
+        expected = (random.random(), np.random.random())
+        random.seed(123)
+        np.random.seed(123)
+        GBMSimulator(["AAPL", "MSFT"], seed=9).step()
+        assert (random.random(), np.random.random()) == expected

@@ -128,11 +128,78 @@ class TestSimulatorDataSource:
         """Test creating source with custom event probability."""
         cache = PriceCache()
         # Very high event probability for testing
-        source = SimulatorDataSource(
-            price_cache=cache, update_interval=0.1, event_probability=1.0
-        )
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1, event_probability=1.0)
         await source.start(["AAPL"])
 
         # Just verify it starts and stops cleanly
         await asyncio.sleep(0.2)
         await source.stop()
+
+
+class TestNormalizationAndReference:
+    async def test_add_ticker_normalizes_case_and_whitespace(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.5, event_probability=0)
+        await source.start(["AAPL"])
+        try:
+            await source.add_ticker("aapl")  # duplicate of AAPL
+            await source.add_ticker(" tsla ")
+            assert source.get_tickers() == ["AAPL", "TSLA"]
+            assert cache.get("TSLA") is not None
+            assert cache.get(" tsla ") is None and cache.get("aapl") is None
+        finally:
+            await source.stop()
+
+    async def test_add_ticker_rejects_malformed(self):
+        source = SimulatorDataSource(price_cache=PriceCache(), update_interval=0.5)
+        await source.start(["AAPL"])
+        try:
+            with pytest.raises(ValueError):
+                await source.add_ticker("not a ticker")
+            assert source.get_tickers() == ["AAPL"]
+        finally:
+            await source.stop()
+
+    async def test_start_cleans_ticker_list(self):
+        source = SimulatorDataSource(price_cache=PriceCache(), update_interval=0.5)
+        await source.start(["aapl", "AAPL", " msft", "bad symbol"])
+        try:
+            assert source.get_tickers() == ["AAPL", "MSFT"]
+        finally:
+            await source.stop()
+
+    async def test_remove_ticker_normalizes(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.5)
+        await source.start(["AAPL", "MSFT"])
+        try:
+            await source.remove_ticker(" msft")
+            assert source.get_tickers() == ["AAPL"]
+            assert cache.get("MSFT") is None
+        finally:
+            await source.stop()
+
+    async def test_reference_price_is_start_price_and_survives_ticks(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01, seed=4)
+        await source.start(["AAPL"])
+        try:
+            assert cache.get("AAPL").reference_price == 190.0  # seed price
+            await asyncio.sleep(0.1)
+            update = cache.get("AAPL")
+            assert update.reference_price == 190.0  # steps do not move the baseline
+            assert update.day_change_percent == pytest.approx(
+                (update.price - 190.0) / 190.0 * 100, abs=1e-3
+            )
+        finally:
+            await source.stop()
+
+    async def test_seed_makes_runs_reproducible(self):
+        async def run():
+            cache = PriceCache()
+            source = SimulatorDataSource(price_cache=cache, update_interval=60, seed=21)
+            await source.start(["AAPL", "NVDA"])
+            await source.stop()
+            return {t: cache.get_price(t) for t in ("AAPL", "NVDA")}
+
+        assert await run() == await run()

@@ -4,6 +4,12 @@ Implementation-ready design for the FinAlly market data subsystem: the unified A
 
 All code lives in `backend/app/market/`. This document supersedes `planning/archive/MARKET_DATA_DESIGN.md`. It is written against the code as it exists today and marks every place where the design **changes** that code (tagged **[CHANGE]**). Untagged snippets match the current implementation.
 
+> **Status: implemented** (see `MARKET_DATA_REVIEW.md` §8 for the resolution of each finding). The code in `backend/app/market/` is the source of truth; where snippets below differ, the code wins. Known corrections to this document:
+>
+> - The real `massive` `LastTrade` model has **no `timestamp` attribute**. The trade time is `sip_timestamp` (nanoseconds), with `participant_timestamp` / `trf_timestamp` as fallbacks. Snippets below that read `last_trade.timestamp` should read `sip_timestamp`, and tests must build snapshots with `TickerSnapshot.from_dict(...)` rather than `MagicMock`/`SimpleNamespace`.
+> - Beyond this document, the implementation also: validates ticker format (`validate_ticker`, `UnknownTickerError`), rejects non-finite/non-positive prices in `PriceCache.update`, bounds the first Massive poll with a timeout (`FIRST_POLL_TIMEOUT`), raises `UnknownTickerError` from `MassiveDataSource.add_ticker` when a poll shows the symbol is unknown, and carries a `reference_price` / `day_change_percent` baseline on `PriceUpdate` (previous close for Massive, start price for the simulator).
+> - `PriceCache.remove()` now bumps `version` when something was removed, so the SSE stream notices removals.
+
 Related docs: `MARKET_INTERFACE.md` (API summary), `MARKET_SIMULATOR.md` (simulator model), `MASSIVE_API.md` (REST reference), `MARKET_DATA_SUMMARY.md` (status).
 
 ---
@@ -560,7 +566,7 @@ Rule: **exactly one batched call per poll**, never one call per ticker.
 
 ### 8.2 Snapshot → price mapping **[CHANGE]**
 
-The current code reads only `last_trade.price` and divides `last_trade.timestamp` by 1000. Two defects, both documented in `MARKET_INTERFACE.md`:
+The original code read only `last_trade.price` and divided a non-existent `last_trade.timestamp` by 1000. Three defects (the first was found in review; the real attribute is `sip_timestamp`), both documented in `MARKET_INTERFACE.md`:
 
 1. `lastTrade.t` is **nanoseconds**, not ms. Dividing by 1000 yields timestamps ~10⁶× too large.
 2. `lastTrade` is absent on plans without trade data, and pre-market. The ticker is then skipped forever.
@@ -602,7 +608,8 @@ def extract_price(snap: Any) -> tuple[float, float] | None:
 
     trade = _attr(snap, "last_trade")
     if (p := _attr(trade, "price")) and p > 0:
-        ts = _attr(trade, "timestamp") or _attr(snap, "updated")
+        ts = (_attr(trade, "sip_timestamp") or _attr(trade, "participant_timestamp")
+              or _attr(snap, "updated"))
         return float(p), to_epoch_seconds(ts) if ts else now
 
     for bar_name in ("min", "day", "prev_day"):
@@ -612,7 +619,7 @@ def extract_price(snap: Any) -> tuple[float, float] | None:
     return None
 ```
 
-Attribute names (`last_trade.price`, `min.close`, `day.close`, `prev_day.close`, `updated`) follow the `massive` package's generated models; confirm with `dir(snap)` on first run with a real key since the model layer has changed between versions.
+Attribute names (`last_trade.price`, `last_trade.sip_timestamp`, `min.close`, `day.close`, `prev_day.close`, `updated`) follow the `massive` package's generated models; confirm with `dir(snap)` on first run with a real key since the model layer has changed between versions.
 
 Using `now` for bar fallbacks is intentional: the cache timestamp means "when we learned this price", and the stale-quote case stays visible through `previous_price`/`direction` staying flat.
 
@@ -1080,7 +1087,7 @@ def snap(**kw):
 
 
 def test_prefers_last_trade_with_ns_timestamp():
-    s = snap(last_trade=NS(price=190.1, timestamp=1_605_195_918_306_274_000))
+    s = snap(last_trade=NS(price=190.1, sip_timestamp=1_605_195_918_306_274_000))
     price, ts = extract_price(s)
     assert price == 190.1
     assert ts == pytest.approx(1_605_195_918.306, abs=1e-3)
@@ -1107,7 +1114,7 @@ from app.market.massive_client import MassiveDataSource
 
 def mk(ticker, price, ts=1_707_580_800_000_000_000):
     from types import SimpleNamespace as NS
-    return NS(ticker=ticker, last_trade=NS(price=price, timestamp=ts),
+    return NS(ticker=ticker, last_trade=NS(price=price, sip_timestamp=ts),
               min=None, day=None, prev_day=None, updated=None)
 
 
@@ -1293,11 +1300,11 @@ MASSIVE_API_KEY=... uv run python - <<'EOF'
 from massive import RESTClient
 from massive.rest.models import SnapshotMarketType
 s = RESTClient().get_snapshot_all(SnapshotMarketType.STOCKS, tickers=["AAPL"])[0]
-print(s.last_trade.price, s.last_trade.timestamp, s.prev_day.close, s.updated)
+print(s.last_trade.price, s.last_trade.sip_timestamp, s.prev_day.close, s.updated)
 EOF
 ```
 
-A 19-digit `timestamp` confirms nanoseconds.
+A 19-digit `sip_timestamp` confirms nanoseconds.
 
 ---
 
