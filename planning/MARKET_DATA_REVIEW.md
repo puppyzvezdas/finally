@@ -148,3 +148,31 @@ pytest-asyncio with `asyncio_mode = "auto"` does not need this fixture. Remove i
 
 - `git status` shows `planning/archive/*` deleted in the working tree. Confirm that is intended; this review replaces the archived `MARKET_DATA_REVIEW.md`, whose open items are listed above where they still apply.
 - `MARKET_DATA_SUMMARY.md` says "complete, tested, reviewed, all issues resolved". Given C1, update it once the Massive fixes land.
+
+## 8. Resolution (2026-11-04)
+
+All findings were addressed on branch `claude/market-data-review-fixes`. Result: **185 passed, 1 skipped, 98% coverage, `ruff check` clean, no deprecation warnings**, on Python 3.13 and 3.12.
+
+| Finding | Resolution |
+|---|---|
+| C1 wrong attribute | `parse_snapshot()` reads `last_trade.sip_timestamp` (then `participant_timestamp`, `trf_timestamp`, `updated`). Tests use `TickerSnapshot.from_dict`; a regression test asserts `LastTrade` has no `timestamp`. |
+| C2 timestamp unit | `to_epoch_seconds()` normalizes ns/µs/ms/s; tested with a real nanosecond payload. |
+| H1 no `lastTrade` | Fallback chain `last_trade.price` → `min.close` → `day.close` → `prev_day.close`; zero values skipped. |
+| H2 removed ticker resurrected | Tracked set is re-read after the fetch; stale snapshots are dropped. Race test with a blocked worker thread. |
+| H3 startup blocks | First poll bounded by `FIRST_POLL_TIMEOUT` (10s); on timeout the loop retries immediately. |
+| H4 router not idempotent | `APIRouter` is built inside `create_stream_router`. |
+| M1 ticker normalization | `normalize_ticker` / `validate_ticker` / `clean_tickers` in `interface.py`, used by both sources. |
+| M2 invalid prices | `PriceCache.update` raises `ValueError` for non-finite or non-positive prices; `timestamp is None` check. |
+| M3 unknown Massive ticker | `add_ticker` polls (rate-limited) and raises `UnknownTickerError` if Massive returns no price; otherwise accepted as pending. |
+| M4 rate limits | Interval doubles on 429 up to 120s and resets on success; immediate poll on add respects a 12s minimum gap. |
+| M5 SSE silence | `: ping` heartbeat after 10s without data; tests cover it. |
+| M6 shared list | Poll passes a copy of the ticker list to the worker thread. |
+| M7 previous close | `PriceUpdate.reference_price` / `day_change_percent`: `prevDay.c` for Massive, start price for the simulator; included in the SSE payload. |
+| M8 held tickers | Not a source concern (no watchlist route exists yet). Recorded as a requirement in `MARKET_INTERFACE.md` and `backend/CLAUDE.md`. |
+| L1 `version` lock | Read under the lock; `remove()` now also bumps it. |
+| L2 resend all tickers | Left as is (fine at this scale). |
+| L3 conftest fixture | Removed; deprecation warnings are gone. |
+| L4 stale lazy-import docs | Docs updated. |
+| L5 seedable RNG | Optional `seed`, per-instance RNGs. |
+
+Test gaps 1-8 are covered by `test_massive.py`, `test_stream.py`, `test_cache.py`, `test_interface.py`, `test_simulator.py`, `test_source_contract.py` and the existing factory tests (which already clear `MASSIVE_API_KEY`). Gap 9 is an optional live test in `test_massive.py`, skipped without a key; it has not been run against the real API.
